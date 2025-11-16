@@ -177,36 +177,53 @@ def create_app():
 
     app = Flask(__name__)
 
-    # CORS konfigurieren
-    CORS(app, resources={
-        r"/*": {
-            "origins": "*",
-            "methods": ["GET", "POST", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"]
-        }
-    })
+    # ===================== CORS KONFIGURATION =====================
+    # Erlaubte Origins für Production (Firebase Hosting + lokale Entwicklung)
+    allowed_origins = [
+        "https://ai-chatbot-system-c8204.web.app",
+        "https://ai-chatbot-system-c8204.firebaseapp.com",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000"
+    ]
+    # Wenn FLASK_ENV=development gesetzt ist → alle Origins erlauben (lokales Debugging)
+    if os.getenv("FLASK_ENV") == "development":
+        allowed_origins = "*"
 
-    # CORS Headers
-    @app.after_request
-    def after_request(response):
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-        return response
+    CORS(
+        app,
+        resources={r"/api/*": {
+            "origins": allowed_origins,
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "supports_credentials": True,
+            "max_age": 3600  # Preflight-Ergebnis für 1h cachen
+        }}
+    )
+    # HINWEIS: Kein after_request mehr nötig – flask-cors setzt die Header.
 
-    # API initialisieren
+    # ===================== API INITIALISIERUNG =====================
     if API_KEY:
         genai.configure(api_key=API_KEY)
         print("✅ Gemini API konfiguriert")
     else:
         print("⚠️  WARNUNG: GOOGLE_API_KEY nicht gefunden!")
 
-    # Datenbank initialisieren
+    # ===================== DATENBANK =====================
     try:
         create_database()
         print("✅ Datenbank initialisiert")
     except Exception as e:
         print(f"⚠️  Datenbank-Fehler: {e}")
+
+    # ===================== DEBUG / CORS TEST ENDPOINT =====================
+    @app.route('/api/cors-test', methods=['GET', 'OPTIONS'])
+    def cors_test():
+        return jsonify({
+            "message": "CORS OK",
+            "origin": request.headers.get('Origin'),
+            "method": request.method,
+            "allowed_origins": allowed_origins if allowed_origins != "*" else "* (development)"
+        }), 200
 
     # ========================================================================
     # ROUTES
@@ -456,4 +473,3 @@ if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     print("🚀 Flask API startet auf Port", port)
     app.run(debug=False, host='0.0.0.0', port=port)
-

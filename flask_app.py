@@ -478,5 +478,7 @@ if __name__ == '__main__':
     print("   GET  /api/conversations/<id>")
     print("\n✅ Server bereit! Drücke Ctrl+C zum Beenden.\n")
 
-    app.run(debug=True, host='localhost', port=5000)
+    # Railway-kompatibel: Nutze PORT Environment Variable
+    port = int(os.getenv('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)
 

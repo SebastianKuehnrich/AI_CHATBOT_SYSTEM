@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from datetime import datetime
 import sqlite3
+import logging
 
 # .env laden
 load_dotenv()
@@ -106,12 +107,12 @@ def load_conversations():
 
 
 def load_conversation_history(conversation_id):
-    """Lädt Messages einer Conversation"""
+    """Lädt Messages einer Conversation inkl. Timestamp"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT role, content
+        SELECT role, content, timestamp
         FROM messages
         WHERE conversation_id = ?
         ORDER BY timestamp ASC
@@ -254,7 +255,20 @@ def create_app():
         return jsonify({
             'status': 'ok',
             'message': 'AI Chatbot API läuft',
-            'api_key_configured': bool(API_KEY)
+            'api_key_configured': bool(API_KEY),
+            'capabilities_endpoint': '/api/capabilities'
+        })
+
+    @app.route('/api/capabilities', methods=['GET'])
+    def capabilities():
+        """Gibt aktuelle Feature Flags zurück für Frontend-UI"""
+        return jsonify({
+            'chat': True,
+            'personas': True,
+            'persistence': True,
+            'multi_session': False,  # Noch nicht implementiert
+            'gemini': bool(API_KEY),
+            'version': '1.0'
         })
 
     @app.route('/api/personas', methods=['GET'])
@@ -274,29 +288,31 @@ def create_app():
 
     @app.route('/api/chat/start', methods=['POST'])
     def start_chat():
-        """Startet einen neuen Chat"""
+        """Startet einen neuen Chat (optional conversation_id ignoriert)"""
         global active_chat, current_persona, current_session_name
 
         try:
-            data = request.json
+            data = request.json or {}
             persona_key = data.get('persona_key')
             session_name = data.get('session_name')
+            _client_conversation_id = data.get('conversation_id')  # aktuell nicht genutzt
 
             if persona_key not in PERSONAS:
-                return jsonify({'error': 'Ungültige Persona'}), 400
-
+                return error_response('Ungültige Persona', 400, code='INVALID_PERSONA')
             if not session_name:
-                return jsonify({'error': 'Session Name erforderlich'}), 400
+                return error_response('Session Name erforderlich', 400, code='MISSING_SESSION_NAME')
 
             persona = PERSONAS[persona_key]
             current_persona = persona_key
             current_session_name = session_name
 
+            temperature = persona.get('temperature', persona.get('temp'))
+
             model = genai.GenerativeModel(
                 'gemini-2.0-flash',
                 system_instruction=persona['instruction'],
                 generation_config={
-                    'temperature': persona['temperature'],
+                    'temperature': temperature,
                     'top_p': persona['top_p'],
                     'top_k': persona['top_k'],
                     'max_output_tokens': 500
@@ -304,16 +320,19 @@ def create_app():
             )
 
             active_chat = model.start_chat(history=[])
+            logging.info("Chat gestartet Persona=%s Session=%s", persona['name'], session_name)
 
             return jsonify({
                 'status': 'success',
                 'message': f'Chat gestartet mit {persona["name"]}',
                 'persona': persona['name'],
-                'session_name': session_name
+                'session_name': session_name,
+                'conversation_id': _client_conversation_id  # Echo zurück (falls Frontend sendet)
             })
 
         except Exception as e:
-            return jsonify({'error': str(e)}), 500
+            logging.error("Fehler beim Starten des Chats: %s", e)
+            return error_response(str(e), 500, code='START_EXCEPTION')
 
     @app.route('/api/chat/send', methods=['POST'])
     def send_message():
@@ -322,39 +341,32 @@ def create_app():
 
         try:
             if not active_chat:
-                return jsonify({'error': 'Kein Chat aktiv'}), 400
+                return error_response('Kein Chat aktiv – zuerst /api/chat/start aufrufen', 400, code='NO_ACTIVE_CHAT')
 
-            data = request.json
+            data = request.json or {}
             message = data.get('message')
-
             if not message:
-                return jsonify({'error': 'Nachricht erforderlich'}), 400
+                return error_response('Nachricht erforderlich', 400, code='MISSING_MESSAGE')
 
             response = active_chat.send_message(message)
-            finish_reason = response.candidates[0].finish_reason
+            candidate = response.candidates[0]
+            finish_reason = candidate.finish_reason
 
-            if finish_reason == 1:
-                return jsonify({
-                    'status': 'success',
-                    'message': response.text,
-                    'finish_reason': 'STOP'
-                })
-            elif finish_reason == 2:
-                text = response.candidates[0].content.parts[0].text if response.candidates[0].content.parts else ""
-                return jsonify({
-                    'status': 'success',
-                    'message': text,
-                    'finish_reason': 'MAX_TOKENS',
-                    'warning': 'Antwort wurde gekürzt'
-                })
+            if finish_reason == 1:  # STOP
+                return jsonify({'status': 'success', 'message': response.text, 'finish_reason': 'STOP'})
+            elif finish_reason == 2:  # MAX_TOKENS
+                text = candidate.content.parts[0].text if candidate.content.parts else ""
+                return jsonify({'status': 'success', 'message': text, 'finish_reason': 'MAX_TOKENS', 'warning': 'Antwort gekürzt'})
+            elif finish_reason == 3:  # SAFETY
+                return error_response('Antwort blockiert (Safety)', 403, code='SAFETY_BLOCK')
+            elif finish_reason == 4:  # RECITATION
+                return error_response('Antwort blockiert (Recitation)', 403, code='RECITATION_BLOCK')
             else:
-                return jsonify({
-                    'status': 'error',
-                    'message': f'Fehler: finish_reason={finish_reason}'
-                }), 500
+                return error_response(f'Unbekannte finish_reason={finish_reason}', 500, code='UNKNOWN_FINISH_REASON')
 
         except Exception as e:
-            return jsonify({'error': str(e)}), 500
+            logging.error("Fehler beim Senden: %s", e)
+            return error_response(str(e), 500, code='SEND_EXCEPTION')
 
     @app.route('/api/chat/history', methods=['GET'])
     def get_chat_history():
@@ -430,10 +442,11 @@ def create_app():
             messages = load_conversation_history(conversation_id)
 
             messages_list = []
-            for role, content in messages:
+            for role, content, timestamp in messages:
                 messages_list.append({
                     'role': role,
-                    'content': content
+                    'content': content,
+                    'timestamp': timestamp
                 })
 
             return jsonify({
@@ -442,7 +455,30 @@ def create_app():
             })
 
         except Exception as e:
+            logging.error("Fehler beim Laden der Conversation %s: %s", conversation_id, e)
             return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/debug-session', methods=['GET'])
+    def debug_session():
+        """Debug Endpoint für Session-Status"""
+        return jsonify({
+            'active': active_chat is not None,
+            'current_persona': current_persona,
+            'current_session_name': current_session_name,
+            'history_length': len(active_chat.history) if active_chat else 0
+        })
+
+    @app.route('/api/diagnostic', methods=['GET'])
+    def diagnostic():
+        """Erweiterter Diagnose-Endpunkt für Frontend Debugging"""
+        return jsonify({
+            'active_chat': active_chat is not None,
+            'current_persona': current_persona,
+            'current_session_name': current_session_name,
+            'history_length': len(active_chat.history) if active_chat else 0,
+            'personas_available': list(PERSONAS.keys()),
+            'api_key_present': bool(API_KEY)
+        })
 
     @app.errorhandler(404)
     def not_found(error):
@@ -453,6 +489,24 @@ def create_app():
     def internal_error(error):
         """500 Error Handler"""
         return jsonify({'error': 'Interner Server Error'}), 500
+
+    # Helper für einheitliche Fehlerantworten
+    def error_response(message, status_code=400, code=None, extra=None):
+        payload = {
+            'status': 'error',
+            'message': message,
+            'http_status': status_code
+        }
+        if code is not None:
+            payload['code'] = code
+        if extra:
+            payload['extra'] = extra
+        return jsonify(payload), status_code
+
+    # Request Logging für Diagnose (nur Basisdaten)
+    @app.before_request
+    def log_request_info():
+        print(f"➡️ {request.method} {request.path} origin={request.headers.get('Origin')} content_type={request.headers.get('Content-Type')}")
 
     return app
 

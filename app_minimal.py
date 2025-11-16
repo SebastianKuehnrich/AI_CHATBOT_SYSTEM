@@ -4,30 +4,42 @@ Minimal Flask App für Railway - CORS optimiert
 from flask import Flask, jsonify, request  # request ergänzt
 from flask_cors import CORS
 import os
+import logging
+
+APP_VERSION = "minimal-1.1"
+
+# Logging konfigurieren (Gunicorn leitet stdout/stderr in Logs weiter)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.info(f"🚀 Starte app_minimal Version {APP_VERSION}")
+
+ALLOWED_ORIGINS = [
+    "https://ai-chatbot-system-c8204.web.app",
+    "https://ai-chatbot-system-c8204.firebaseapp.com",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000"
+]
 
 app = Flask(__name__)
 
 # ✅ OPTIMIERTE CORS-KONFIGURATION
 CORS(app, resources={
     r"/api/*": {
-        "origins": [
-            "https://ai-chatbot-system-c8204.web.app",
-            "https://ai-chatbot-system-c8204.firebaseapp.com",
-            "http://localhost:3000",
-            "http://127.0.0.1:3000"
-        ],
+        "origins": ALLOWED_ORIGINS,
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
         "supports_credentials": True,
         "max_age": 3600
     }
 })
+logging.info("CORS aktiviert für Origins: %s", ALLOWED_ORIGINS)
 
 @app.route('/')
 def root():
     return jsonify({
         'status': 'online',
-        'message': 'Minimal Test App läuft'
+        'message': 'Minimal Test App läuft',
+        'version': APP_VERSION,
+        'origins': ALLOWED_ORIGINS
     })
 
 @app.route('/api/health')
@@ -35,7 +47,19 @@ def health():
     return jsonify({
         'status': 'ok',
         'message': 'Health endpoint funktioniert',
-        'cors_origin': request.headers.get('Origin', 'None')
+        'cors_origin': request.headers.get('Origin', 'None'),
+        'version': APP_VERSION
+    })
+
+# Debug-Endpoint zur Einsicht in Header & Environment
+@app.route('/api/debug')
+def debug():
+    return jsonify({
+        'version': APP_VERSION,
+        'request_headers': {k: v for k, v in request.headers.items()},
+        'env_PORT': os.getenv('PORT'),
+        'env_FLASK_ENV': os.getenv('FLASK_ENV'),
+        'allowed_origins': ALLOWED_ORIGINS
     })
 
 @app.route('/api/test')
@@ -86,12 +110,10 @@ def cors_test():
         'message': 'CORS works!',
         'origin': request.headers.get('Origin'),
         'method': request.method,
-        'allowed_origins': [
-            'https://ai-chatbot-system-c8204.web.app',
-            'https://ai-chatbot-system-c8204.firebaseapp.com'
-        ]
+        'allowed_origins': ALLOWED_ORIGINS
     }), 200
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
+    logging.info(f"Lokaler Entwicklungsstart auf Port {port}")
     app.run(host='0.0.0.0', port=port)

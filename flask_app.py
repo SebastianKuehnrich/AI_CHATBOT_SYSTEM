@@ -195,11 +195,11 @@ def create_app():
 
     CORS(
         app,
-        resources={r"/api*": {
+        resources={r"/api/*": {
             "origins": allowed_origins,
             "methods": ["GET", "POST", "OPTIONS"],
             "allow_headers": ["Content-Type"],
-            "supports_credentials": False,
+            "supports_credentials": True,
             "max_age": 3600  # Preflight-Ergebnis für 1h cachen
         }}
     )
@@ -618,8 +618,7 @@ def create_app():
             except Exception as e:
                 return error_response(str(e), 500, code='START_SEND_EXCEPTION')
         if persona_key and session_name and not incoming_message:
-            start_resp = start_chat()
-            return start_resp
+            return error_response('Chat-Start ohne Nachricht nicht unterstützt. Verwende /api/chat/start', 400, code='INVALID_START')
         if incoming_message and (session_id or (not persona_key and not session_name)):
             if session_id:
                 if session_id not in sessions:
